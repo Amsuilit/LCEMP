@@ -1,5 +1,5 @@
 # Minecraft LCEMP
-LCEMP is my Minecraft Legacy Console Edition source fork that enables LAN multiplayer hosting along side more complete pc compatibility.
+LCEMP is a Minecraft Legacy Console Edition source fork that enables LAN multiplayer hosting along side more complete PC compatibility which has been forked from https://github.com/LCEMP/LCEMP.
 
 If you use my multiplayer code or other fixes from this repo in other LCE-based projects, credit me (and the project) and link the repo
 
