@@ -1,6 +1,7 @@
 ﻿
 #include "stdafx.h"
 
+#include <time.h>
 #include "..\..\Minecraft.World\Recipy.h"
 #include "..\..\Minecraft.Client\Options.h"
 #include "..\..\Minecraft.World\AABB.h"
@@ -241,6 +242,26 @@ void CMinecraftApp::DebugPrintf(const char *szFormat, ...)
 	vsnprintf(buf, sizeof(buf), szFormat, ap);
 	va_end(ap);
 	OutputDebugStringA(buf);
+#ifdef WITH_SERVER_CODE
+	bool hasContent = false;
+	for (const char *p = buf; *p; p++) {
+		if (*p != ' ' && *p != '\t' && *p != '\n' && *p != '\r' && *p != '=') {
+			hasContent = true;
+			break;
+		}
+	}
+	if (hasContent)
+	{
+		size_t len = strlen(buf);
+		while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r'))
+			buf[--len] = '\0';
+
+		time_t now = time(NULL);
+		struct tm t;
+		localtime_s(&t, &now);
+		printf("[%02d:%02d:%02d] [Server thread/INFO]: %s\n", t.tm_hour, t.tm_min, t.tm_sec, buf);
+	}
+#endif
 #endif
 
 }
@@ -303,6 +324,9 @@ LPCWSTR CMinecraftApp::GetString(int iID)
 {
 	//return L"Değişiklikler ve Yenilikler";
 	//return L"ÕÕÕÕÖÖÖÖ";
+#ifdef WITH_SERVER_CODE
+	if (!app.m_stringTable) return L"";
+#endif
 	return app.m_stringTable->getString(iID);
 }
 
@@ -674,7 +698,12 @@ void CMinecraftApp::InitGameSettings()
 		C_4JProfile::PROFILESETTINGS *pProfileSettings=ProfileManager.GetDashboardProfileSettings(i);
 		// clear this for now - it will come from reading the system values
 		memset(pProfileSettings,0,sizeof(C_4JProfile::PROFILESETTINGS));
-		SetDefaultOptions(pProfileSettings,i);
+
+		extern bool Win64_HasSavedProfile(int iPad);
+		if (!Win64_HasSavedProfile(i))
+		{
+			SetDefaultOptions(pProfileSettings,i);
+		}
 #elif defined __PS3__ || defined __ORBIS__ || defined _DURANGO  || defined __PSVITA__
 		C4JStorage::PROFILESETTINGS *pProfileSettings=StorageManager.GetDashboardProfileSettings(i);
 		// 4J-PB - don't cause an options write to happen here
@@ -755,6 +784,9 @@ int CMinecraftApp::SetDefaultOptions(C_4JProfile::PROFILESETTINGS *pSettings,con
 //#ifdef __PS3__
 	// PS3DEC13
 	SetGameSettings(iPad,eGameSetting_PS3_EULA_Read,0); // EULA not read
+
+	// Windows64
+	SetGameSettings(iPad,eGameSetting_Fullscreen,1); // fullscreen on by default
 
 	// PS3 1.05 - added Greek
 	GameSettingsA[iPad]->ucLanguage = MINECRAFT_LANGUAGE_DEFAULT; // use the system language
@@ -1376,6 +1408,9 @@ void CMinecraftApp::ActionGameSettings(int iPad,eGameSetting eVal)
 		//nothing to do here
 		break;
 	case eGameSetting_PSVita_NetworkModeAdhoc:
+		//nothing to do here
+		break;
+	case eGameSetting_Fullscreen:
 		//nothing to do here
 		break;
 	}
@@ -2047,6 +2082,21 @@ void CMinecraftApp::SetGameSettings(int iPad,eGameSetting eVal,unsigned char ucV
 			GameSettingsA[iPad]->bSettingsChanged=true;
 		}		
 		break;	
+	case eGameSetting_Fullscreen:
+		if((GameSettingsA[iPad]->uiBitmaskValues&GAMESETTING_FULLSCREEN)!=((ucVal&0x01)<<18))
+		{
+			if(ucVal==1)
+			{
+				GameSettingsA[iPad]->uiBitmaskValues|=GAMESETTING_FULLSCREEN;
+			}
+			else
+			{
+				GameSettingsA[iPad]->uiBitmaskValues&=~GAMESETTING_FULLSCREEN;
+			}
+			ActionGameSettings(iPad,eVal);
+			GameSettingsA[iPad]->bSettingsChanged=true;
+		}
+		break;
 
 	}
 }
@@ -2172,6 +2222,9 @@ unsigned char CMinecraftApp::GetGameSettings(int iPad,eGameSetting eVal)
 
 	case eGameSetting_PSVita_NetworkModeAdhoc:
 		return (GameSettingsA[iPad]->uiBitmaskValues&GAMESETTING_PSVITANETWORKMODEADHOC)>>17;
+
+	case eGameSetting_Fullscreen:
+		return (GameSettingsA[iPad]->uiBitmaskValues&GAMESETTING_FULLSCREEN)>>18;
 
 	}
 	return 0;

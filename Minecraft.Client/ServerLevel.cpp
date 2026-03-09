@@ -922,6 +922,7 @@ void ServerLevel::saveToDisc(ProgressListener *progressListener, bool autosave)
 	// 4J-PB - check that saves are enabled
 	if(StorageManager.GetSaveDisabled()) return;
 
+#ifndef WITH_SERVER_CODE
 	// Check if we are using a trial version of a texture pack (which will be the case for going into the mash-up pack world with a trial version)
 	if(!Minecraft::GetInstance()->skins->isUsingDefaultSkin())
 	{
@@ -935,6 +936,7 @@ void ServerLevel::saveToDisc(ProgressListener *progressListener, bool autosave)
 			return;
 		}
 	}
+#endif
 
 	if (progressListener != NULL) progressListener->progressStage(IDS_PROGRESS_SAVING_TO_DISC);
 	levelStorage->flushSaveFile(autosave);
@@ -982,7 +984,9 @@ void ServerLevel::entityRemoved(shared_ptr<Entity> e)
 
 shared_ptr<Entity> ServerLevel::getEntity(int id)
 {
-	return entitiesById[id];
+	AUTO_VAR(it, entitiesById.find(id));
+	if(it != entitiesById.end()) return it->second;
+	return nullptr;
 }
 
 bool ServerLevel::addGlobalEntity(shared_ptr<Entity> e)

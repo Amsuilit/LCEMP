@@ -17,6 +17,7 @@
 #include "..\..\Minecraft.World\Vec3.h"
 #include "..\..\Minecraft.World\Level.h"
 #include "..\..\Minecraft.World\net.minecraft.world.level.tile.h"
+#include "..\MultiplayerLocalPlayer.h"
 
 #include "..\ClientConnection.h"
 #include "..\User.h"
@@ -37,7 +38,12 @@
 #include "Resource.h"
 #include "..\..\Minecraft.World\compression.h"
 #include "..\..\Minecraft.World\OldChunkStorage.h"
+
 #include "Network\WinsockNetLayer.h"
+
+#include "..\PlayerRenderer.h"
+
+#include "Windows64_PostProcess.h"
 
 #include "Xbox/resource.h"
 
@@ -262,7 +268,7 @@ HRESULT InitD3D( IDirect3DDevice9 **ppDevice,
 	pd3dPP->EnableAutoDepthStencil = TRUE;
 	pd3dPP->AutoDepthStencilFormat = D3DFMT_D24S8;
 	pd3dPP->SwapEffect             = D3DSWAPEFFECT_DISCARD;
-	pd3dPP->PresentationInterval   = D3DPRESENT_INTERVAL_ONE;
+	pd3dPP->PresentationInterval   = D3DPRESENT_INTERVAL_IMMEDIATE;
 	//pd3dPP->Flags				   = D3DPRESENTFLAG_NO_LETTERBOX;
 	//ERR[D3D]: Can't set D3DPRESENTFLAG_NO_LETTERBOX when wide-screen is enabled
 	//	in the launcher/dashboard.
@@ -343,54 +349,23 @@ ID3D11Device*           g_pd3dDevice = NULL;
 ID3D11DeviceContext*    g_pImmediateContext = NULL;
 IDXGISwapChain*         g_pSwapChain = NULL;
 
-static WORD g_originalGammaRamp[3][256];
-static bool g_gammaRampSaved = false;
+ID3D11RenderTargetView* g_pRenderTargetView = NULL;
+ID3D11DepthStencilView* g_pDepthStencilView = NULL;
+ID3D11Texture2D*		g_pDepthStencilBuffer = NULL;
 
 void Windows64_UpdateGamma(unsigned short usGamma)
 {
-	if (!g_hWnd) return;
-
-	HDC hdc = GetDC(g_hWnd);
-	if (!hdc) return;
-
-	if (!g_gammaRampSaved)
-	{
-		GetDeviceGammaRamp(hdc, g_originalGammaRamp);
-		g_gammaRampSaved = true;
-	}
-
 	float gamma = (float)usGamma / 32768.0f;
-	if (gamma < 0.01f) gamma = 0.01f;
+	if (gamma < 0.0f) gamma = 0.0f;
 	if (gamma > 1.0f) gamma = 1.0f;
 
-	float invGamma = 1.0f / (0.5f + gamma * 0.5f);
-
-	WORD ramp[3][256];
-	for (int i = 0; i < 256; i++)
-	{
-		float normalized = (float)i / 255.0f;
-		float corrected = powf(normalized, invGamma);
-		WORD val = (WORD)(corrected * 65535.0f + 0.5f);
-		ramp[0][i] = val;
-		ramp[1][i] = val;
-		ramp[2][i] = val;
-	}
-
-	SetDeviceGammaRamp(hdc, ramp);
-	ReleaseDC(g_hWnd, hdc);
+	SetGammaValue(0.5f * powf(4.0f, gamma));
 }
 
 void Windows64_RestoreGamma()
 {
-	if (!g_gammaRampSaved || !g_hWnd) return;
-	HDC hdc = GetDC(g_hWnd);
-	if (!hdc) return;
-	SetDeviceGammaRamp(hdc, g_originalGammaRamp);
-	ReleaseDC(g_hWnd, hdc);
+
 }
-ID3D11RenderTargetView* g_pRenderTargetView = NULL;
-ID3D11DepthStencilView* g_pDepthStencilView = NULL;
-ID3D11Texture2D*		g_pDepthStencilBuffer = NULL;
 
 //
 //  FUNCTION: WndProc(HWND, UINT, WPARAM, LPARAM)
@@ -451,6 +426,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		if (vk == VK_F11)
 		{
 			ToggleFullscreen();
+			app.SetGameSettings(0, eGameSetting_Fullscreen, g_isFullscreen ? 1 : 0);
 			break;
 		}
 		if (vk == VK_SHIFT)
@@ -519,6 +495,35 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 					}
 				}
 			}
+#ifdef _WINDOWS64
+			Minecraft* instance = Minecraft::GetInstance();
+			if (!instance)
+				break;
+
+			LocalPlayer* player = instance->localplayers[0].get();
+			if (!player)
+				break;
+
+			int iPad = player->GetXboxPad();
+			if (iPad == 0 && g_KBMInput.IsMouseGrabbed() && g_KBMInput.IsKBMActive())
+			{
+				int dx = g_KBMInput.GetRawDeltaX();
+				int dy = g_KBMInput.GetRawDeltaY();
+				g_KBMInput.ConsumeMouseDelta();
+
+				if (dx != 0 || dy != 0)
+				{
+					float mouseSensitivity = ((float)app.GetGameSettings(iPad, eGameSetting_Sensitivity_InGame)) / 100.0f;
+					float mouseLookScale = 1.0f;
+					float mdx = dx * mouseSensitivity * mouseLookScale;
+					float mdy = -dy * mouseSensitivity * mouseLookScale;
+
+					if (app.GetGameSettings(iPad, eGameSetting_ControlInvertLook))
+						mdy = -mdy;
+						instance->player->turn(mdx, mdy);
+				}
+			}
+#endif
 		}
 		break;
 
@@ -712,6 +717,7 @@ app.DebugPrintf("width: %d, height: %d\n", width, height);
 
 	// Create a depth stencil buffer
 	D3D11_TEXTURE2D_DESC descDepth;
+	ZeroMemory(&descDepth, sizeof(descDepth));
 
 	descDepth.Width = width;
 	descDepth.Height = height;
@@ -727,6 +733,7 @@ app.DebugPrintf("width: %d, height: %d\n", width, height);
 	hr = g_pd3dDevice->CreateTexture2D(&descDepth, NULL, &g_pDepthStencilBuffer);
 
 	D3D11_DEPTH_STENCIL_VIEW_DESC descDSView;
+	ZeroMemory(&descDSView, sizeof(descDSView));
 	descDSView.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
 	descDSView.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
 	descDSView.Texture2D.MipSlice = 0;
@@ -775,6 +782,8 @@ void CleanupDevice()
 	extern void Windows64_RestoreGamma();
 	Windows64_RestoreGamma();
 
+	CleanupGammaPostProcess();
+
 	if( g_pImmediateContext ) g_pImmediateContext->ClearState();
 
 	if( g_pRenderTargetView ) g_pRenderTargetView->Release();
@@ -782,8 +791,6 @@ void CleanupDevice()
 	if( g_pImmediateContext ) g_pImmediateContext->Release();
 	if( g_pd3dDevice ) g_pd3dDevice->Release();
 }
-
-
 
 int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
 					   _In_opt_ HINSTANCE hPrevInstance,
@@ -830,6 +837,33 @@ int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
 			nameBuf[n] = 0;
 			strncpy_s(g_Win64Username, 17, nameBuf, _TRUNCATE);
 		}
+
+		char *ipArg = strstr(cmdLineA, "-ip ");
+		if (ipArg)
+		{
+			ipArg += 4;
+			while (*ipArg == ' ') ipArg++;
+			char ipBuf[256];
+			int n = 0;
+			while (ipArg[n] && ipArg[n] != ' ' && n < 255) { ipBuf[n] = ipArg[n]; n++; }
+			ipBuf[n] = 0;
+			strncpy_s(g_Win64MultiplayerIP, 256, ipBuf, _TRUNCATE);
+			g_Win64MultiplayerJoin = true;
+		}
+
+		char *portArg = strstr(cmdLineA, "-port ");
+		if (portArg)
+		{
+			portArg += 6;
+			while (*portArg == ' ') portArg++;
+			char portBuf[16];
+			int n = 0;
+			while (portArg[n] && portArg[n] != ' ' && n < 15) { portBuf[n] = portArg[n]; n++; }
+			portBuf[n] = 0;
+			g_Win64MultiplayerPort = atoi(portBuf);
+			if (g_Win64MultiplayerPort <= 0) g_Win64MultiplayerPort = WIN64_NET_DEFAULT_PORT;
+		}
+
 	}
 
 	if (g_Win64Username[0] == 0)
@@ -858,6 +892,8 @@ int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
 		CleanupDevice();
 		return 0;
 	}
+
+	InitGammaPostProcess();
 
 #if 0
 	// Main message loop
@@ -991,6 +1027,11 @@ int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
 
 #endif
 
+	StorageManager.Init(1, app.GetString(IDS_DEFAULT_SAVENAME), "savegame.dat", FIFTY_ONE_MB, &CConsoleMinecraftApp::DisplaySavingMessage, (LPVOID)&app, "MinecraftWindows64");
+	StorageManager.SetMaxSaves(99);
+
+	StorageManager.StoreTMSPathName();
+
 	// Ensure the GameHDD save directory exists at runtime (the 4J_Storage lib expects it)
 	{
 		wchar_t exePath[MAX_PATH];
@@ -1030,6 +1071,8 @@ int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
 	}
 	extern wchar_t g_Win64UsernameW[17];
 	wcscpy_s(IQNet::m_player[0].m_gamertag, 32, g_Win64UsernameW);
+
+	PlayerRenderer::InitNametagColors();
 
 	WinsockNetLayer::Initialize();
 
@@ -1073,6 +1116,14 @@ int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
 	Minecraft *pMinecraft=Minecraft::GetInstance();
 
 	app.InitGameSettings();
+
+	if(app.GetGameSettings(eGameSetting_Fullscreen) != 0)
+	{
+		if(!g_isFullscreen)
+		{
+			ToggleFullscreen();
+		}
+	}
 
 #if 0
 	//bool bDisplayPauseMenu=false;
@@ -1121,9 +1172,19 @@ int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
 	app.NavigateToScene(XUSER_INDEX_ANY,eUIScene_Intro,&initData);
 #endif
 
-	// Set the default sound levels
-	pMinecraft->options->set(Options::Option::MUSIC,1.0f);
-	pMinecraft->options->set(Options::Option::SOUND,1.0f);
+	app.ApplyGameSettingsChanged(ProfileManager.GetPrimaryPad());
+
+#ifdef _DEBUG_MENUS_ENABLED
+	if(app.DebugSettingsOn())
+	{
+		app.ActionDebugMask(ProfileManager.GetPrimaryPad());
+	}
+	else
+	{
+		// force debug mask off
+		app.ActionDebugMask(ProfileManager.GetPrimaryPad(),true);
+	}
+#endif
 
 	//app.TemporaryCreateGameStart();
 
@@ -1335,6 +1396,8 @@ int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
 
 		RenderManager.Set_matrixDirty();
 #endif
+		ApplyGammaPostProcess();
+
 		// Present the frame.
 		RenderManager.Present();
 

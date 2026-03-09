@@ -78,10 +78,17 @@ bool MultiPlayerGameMode::destroyBlock(int x, int y, int z, int face)
 	if (oldTile == NULL) return false;
 
 #ifdef _WINDOWS64
+	// https://github.com/LCEMP/LCEMP
 	if (g_NetworkManager.IsHost())
 	{
 		level->levelEvent(LevelEvent::PARTICLES_DESTROY_BLOCK, x, y, z, oldTile->id + (level->getData(x, y, z) << Tile::TILE_NUM_SHIFT));
-		return true;
+		int data = level->getData(x, y, z);
+		bool changed = level->setTile(x, y, z, 0);
+		if (changed)
+		{
+			oldTile->destroy(level, x, y, z, data);
+		}
+		return changed;
 	}
 #endif
 

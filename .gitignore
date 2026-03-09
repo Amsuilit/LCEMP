@@ -2,6 +2,8 @@
 # Build outputs
 # ===========================================
 x64/
+x64_Server_Release/
+x64_Server_Debug/
 Minecraft.Client/x64/
 Minecraft.World/x64_Debug/
 Minecraft.World/x64_Release/
@@ -10,6 +12,7 @@ ipch/
 # ===========================================
 # Visual Studio files
 # ===========================================
+.vs/
 *.sdf
 *.opensdf
 *.suo
@@ -29,6 +32,17 @@ ipch/
 *.exp
 
 # ===========================================
+# CLion files
+# ===========================================
+.idea
+
+# ===========================================
+# CMake
+# ===========================================
+cmake-build-debug
+cmake-build-release
+
+# ===========================================
 # Archives & packaged binaries
 # ===========================================
 *.zip
@@ -43,6 +57,8 @@ Minecraft.Client/music/
 *.binka
 
 # Common Media - UI (SWF), Graphics (PNG), Sound (WAV), Fonts
+Assets
+Assets/Common/Media/
 Minecraft.Client/Common/Media/
 # Game resource textures, art, audio, etc.
 Minecraft.Client/Common/res/
@@ -72,6 +88,7 @@ Minecraft.Client/Windows64/GameHDD/
 *.png
 # But allow source code PNG references to be noted
 !Minecraft.Client/Common/Media/Graphics/.gitkeep
+!Assets/Common/Media/Graphics/.gitkeep
 
 # SWF UI files (Flash-based UI assets)
 *.swf
@@ -81,6 +98,8 @@ Minecraft.Client/Windows64/GameHDD/
 
 # Arc archives (packed texture/media bundles)
 *.arc
+
+!Minecraft.Client/Common/Media/MediaWindows64.arc
 
 # Miles Sound System redistributables
 Minecraft.Client/redist64/
@@ -93,6 +112,10 @@ Minecraft.Client/redist64/
 
 # 4J Studios proprietary libraries
 **/4JLibs/
+
+!Minecraft.Client/Windows64/4JLibs/
+!Minecraft.Client/Windows64/4JLibs/inc/
+!Minecraft.Client/Windows64/4JLibs/inc/4J_Storage.h
 
 # Miles Sound System (RAD Game Tools)
 **/Miles/
@@ -184,3 +207,6 @@ Minecraft.Client/PS3/PS3Extras/HeapInspector/
 
 # Sony remote storage libs
 Minecraft.Client/Common/Network/Sony/
+
+Minecraft.Server/
+build_dedicated/

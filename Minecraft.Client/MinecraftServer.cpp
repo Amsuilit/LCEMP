@@ -33,7 +33,11 @@
 #include "..\Minecraft.World\net.minecraft.world.entity.h"
 #include "ProgressRenderer.h"
 #include "ServerPlayer.h"
+#include "PlayerConnection.h"
 #include "GameRenderer.h"
+#ifdef _WINDOWS64
+#include "Windows64\Network\WinsockNetLayer.h"
+#endif
 #include "..\Minecraft.World\ThreadName.h"
 #include "..\Minecraft.World\IntCache.h"
 #include "..\Minecraft.World\CompressedTileStorage.h"
@@ -45,6 +49,11 @@
 #endif
 #include "PS3\PS3Extras\ShutdownManager.h"
 #include "ServerCommandDispatcher.h"
+
+#ifdef WITH_SERVER_CODE
+#include "..\Minecraft.Server\Commands\ServerCommands.h"
+#endif
+
 #include "..\Minecraft.World\BiomeSource.h"
 #include "PlayerChunkMap.h"
 #include "Common\Telemetry\TelemetryManager.h"
@@ -134,13 +143,11 @@ bool MinecraftServer::initServer(__int64 seed, NetworkGameInitData *initData, DW
 #endif
         settings = new Settings(new File(L"server.properties"));
 
-		app.DebugPrintf("\n*** SERVER SETTINGS ***\n");
-		app.DebugPrintf("ServerSettings: host-friends-only is %s\n",(app.GetGameHostOption(eGameHostOption_FriendsOfFriends)>0)?"on":"off");
-		app.DebugPrintf("ServerSettings: game-type is %s\n",(app.GetGameHostOption(eGameHostOption_GameType)==0)?"Survival Mode":"Creative Mode");
-		app.DebugPrintf("ServerSettings: pvp is %s\n",(app.GetGameHostOption(eGameHostOption_PvP)>0)?"on":"off");
-		app.DebugPrintf("ServerSettings: fire spreads is %s\n",(app.GetGameHostOption(eGameHostOption_FireSpreads)>0)?"on":"off");
-		app.DebugPrintf("ServerSettings: tnt explodes is %s\n",(app.GetGameHostOption(eGameHostOption_TNT)>0)?"on":"off");
-		app.DebugPrintf("\n");
+		app.DebugPrintf("host-friends-only is %s",(app.GetGameHostOption(eGameHostOption_FriendsOfFriends)>0)?"on":"off");
+		app.DebugPrintf("game-type is %s",(app.GetGameHostOption(eGameHostOption_GameType)==0)?"Survival Mode":"Creative Mode");
+		app.DebugPrintf("pvp is %s",(app.GetGameHostOption(eGameHostOption_PvP)>0)?"on":"off");
+		app.DebugPrintf("fire-spreads is %s",(app.GetGameHostOption(eGameHostOption_FireSpreads)>0)?"on":"off");
+		app.DebugPrintf("tnt-explodes is %s",(app.GetGameHostOption(eGameHostOption_TNT)>0)?"on":"off");
 
 		// TODO 4J Stu - Init a load of settings based on data passed as params
 		//settings->setBooleanAndSave( L"host-friends-only", (app.GetGameHostOption(eGameHostOption_FriendsOfFriends)>0) );
@@ -149,7 +156,7 @@ bool MinecraftServer::initServer(__int64 seed, NetworkGameInitData *initData, DW
         //localIp = settings->getString(L"server-ip", L"");
         //onlineMode = settings->getBoolean(L"online-mode", true);
 		//motd = settings->getString(L"motd", L"A Minecraft Server");
-        //motd.replace('§', '$');
+        //motd.replace('ï¿½', '$');
 
         setAnimals(settings->getBoolean(L"spawn-animals", true));
 		setNpcsEnabled(settings->getBoolean(L"spawn-npcs", true));
@@ -267,6 +274,14 @@ bool MinecraftServer::initServer(__int64 seed, NetworkGameInitData *initData, DW
 		}
 
 		g_NetworkManager.ServerReady();	// 4J added
+
+#ifdef WITH_SERVER_CODE
+		{
+			extern QNET_STATE _iQNetStubState;
+			_iQNetStubState = QNET_STATE_GAME_PLAY;
+		}
+#endif
+
         return m_bLoaded;
 
 }
@@ -389,7 +404,7 @@ bool MinecraftServer::loadLevel(LevelStorageSource *storageSource, const wstring
 
 	int gameTypeId = settings->getInt(L"gamemode", app.GetGameHostOption(eGameHostOption_GameType));//LevelSettings::GAMETYPE_SURVIVAL);
 	GameType *gameType = LevelSettings::validateGameType(gameTypeId);
-	app.DebugPrintf("Default game type: %d\n" , gameTypeId);
+	app.DebugPrintf("Default game type: %d" , gameTypeId);
 
 	LevelSettings *levelSettings = new LevelSettings(levelSeed, gameType, app.GetGameHostOption(eGameHostOption_Structures)>0?true:false, isHardcore(), true, pLevelType, initData->xzSize, initData->hellScale);
 	if( app.GetGameHostOption(eGameHostOption_BonusChest ) ) levelSettings->enableStartingBonusItems();
@@ -481,7 +496,7 @@ bool MinecraftServer::loadLevel(LevelStorageSource *storageSource, const wstring
 		Minecraft *pMinecraft = Minecraft::GetInstance();
 //		m_lastSentDifficulty = pMinecraft->options->difficulty;
 		levels[i]->difficulty = app.GetGameHostOption(eGameHostOption_Difficulty); //pMinecraft->options->difficulty;
-		app.DebugPrintf("MinecraftServer::loadLevel - Difficulty = %d\n",levels[i]->difficulty);
+		app.DebugPrintf("MinecraftServer::loadLevel - Difficulty = %d",levels[i]->difficulty);
 
 #if DEBUG_SERVER_DONT_SPAWN_MOBS
         levels[i]->setSpawnSettings(false, false);
@@ -659,8 +674,6 @@ bool MinecraftServer::loadLevel(LevelStorageSource *storageSource, const wstring
 	if(levels[0]->dimension->id==0)
 	{
 
-		app.DebugPrintf("===================================\n");
-
 		if(!levels[0]->getLevelData()->getHasStronghold())
 		{
 			int x,z;			
@@ -670,20 +683,19 @@ bool MinecraftServer::loadLevel(LevelStorageSource *storageSource, const wstring
 				levels[0]->getLevelData()->setZStronghold(z);
 				levels[0]->getLevelData()->setHasStronghold();
 
-				app.DebugPrintf("=== FOUND stronghold in terrain features list\n");
+				app.DebugPrintf("Found stronghold in terrain features list");
 
 			}
 			else
 			{
 				// can't find the stronghold position in the terrain feature list. Do we have to run a post-process?
-				app.DebugPrintf("=== Can't find stronghold in terrain features list\n");
+				app.DebugPrintf("Can't find stronghold in terrain features list");
 			}
 		}
 		else
 		{
-			app.DebugPrintf("=== Leveldata has stronghold position\n");
+			app.DebugPrintf("Leveldata has stronghold position");
 		}
-		app.DebugPrintf("===================================\n");
 	}
 
 //	printf("Post processing complete at %dms\n",System::currentTimeMillis() - startTime);
@@ -881,12 +893,16 @@ void MinecraftServer::stopServer()
 	// 4J-PB - If the primary player has signed out, then don't attempt to save anything
 	
 	// also need to check for a profile switch here - primary player signs out, and another player signs in before dismissing the dash
-#ifdef _DURANGO
+#ifdef WITH_SERVER_CODE
+	{
+		{
+#elif defined(_DURANGO)
 	// On Durango check if the primary user is signed in OR mid-sign-out
 	if(ProfileManager.GetUser(0, true) != nullptr)
 #else
 	if((m_bPrimaryPlayerSignedOut==false) && ProfileManager.IsSignedIn(ProfileManager.GetPrimaryPad()))
 #endif
+#ifndef WITH_SERVER_CODE
 	{
 #if defined(_XBOX_ONE) || defined(__ORBIS__)
 		// Always save on exit! Except if saves are disabled.
@@ -895,6 +911,7 @@ void MinecraftServer::stopServer()
 		// if trial version or saving is disabled, then don't save anything
 		if(m_saveOnExit && ProfileManager.IsFullVersion() && (!StorageManager.GetSaveDisabled()))
 		{	
+#endif
 			if (players != NULL)
 			{
 				players->saveAll(Minecraft::GetInstance()->progressRenderer, true);
@@ -925,7 +942,7 @@ void MinecraftServer::stopServer()
 
 	// On Durango/Orbis, we need to wait for all the asynchronous saving processes to complete before destroying the levels, as that will ultimately delete
 	// the directory level storage & therefore the ConsoleSaveSplit instance, which needs to be around until all the sub files have completed saving.
-#if defined(_DURANGO) || defined(__ORBIS__) || defined(__PSVITA__)
+#if defined(_DURANGO) || defined(__ORBIS__) || defined(__PSVITA__) || defined(_WINDOWS64)
 	while(StorageManager.GetSaveState() != C4JStorage::ESaveGame_Idle )
 	{
 		Sleep(10);
@@ -1074,6 +1091,13 @@ void MinecraftServer::run(__int64 seed, void *lpParameter)
 				pLevelData->setHasStronghold();
 			}
 		}
+
+#ifdef WITH_SERVER_CODE
+		{
+			__int64 doneTime = System::currentTimeMillis();
+			app.DebugPrintf("Done! For help, type \"help\" or \"?\"");
+		}
+#endif
 
         __int64 lastTime = System::currentTimeMillis();
         __int64 unprocessedTime = 0;
@@ -1527,6 +1551,11 @@ void MinecraftServer::tick()
     }
 	Entity::tickExtraWandering();	// 4J added
 
+#ifdef WITH_SERVER_CODE
+	g_NetworkManager.DoWork();
+	WinsockNetLayer::FlushPendingData();
+#endif
+
 	PIXBeginNamedEvent(0,"Connection tick");
     connection->tick();
 	PIXEndNamedEvent();
@@ -1560,7 +1589,13 @@ void MinecraftServer::handleConsoleInputs()
 		AUTO_VAR(it, consoleInput.begin());
         ConsoleInput *input = *it;
 		consoleInput.erase(it);
+#ifdef WITH_SERVER_CODE
+		HandleServerCommand(input->msg, input->source, this);
+		delete input;
+#else
 //        commands->handleCommand(input);		// 4J - removed - TODO - do we want equivalent of console commands?
+		delete input;
+#endif
     }
 }
 

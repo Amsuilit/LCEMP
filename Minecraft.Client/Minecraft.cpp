@@ -1503,7 +1503,6 @@ void Minecraft::run_middle()
 							}
 						}
 
-						// Utility keys always work regardless of KBM active state
 						if(g_KBMInput.IsKeyPressed(KeyboardMouseInput::KEY_PAUSE))
 						{
 							localplayers[i]->ullButtonsPressed|=1LL<<MINECRAFT_ACTION_PAUSEMENU;
@@ -5047,11 +5046,18 @@ void Minecraft::handleClientTextureReceived(const wstring &textureName)
 
 unsigned int Minecraft::getCurrentTexturePackId()
 {
+#ifdef WITH_SERVER_CODE
+	return 0;
+#else
 	return skins->getSelected()->getId();
+#endif
 }
 
 ColourTable *Minecraft::getColourTable()
 {
+#ifdef WITH_SERVER_CODE
+	return NULL;
+#else
 	TexturePack *selected = skins->getSelected();
 
 	ColourTable *colours = selected->getColourTable();
@@ -5062,6 +5068,7 @@ ColourTable *Minecraft::getColourTable()
 	}
 
 	return colours;
+#endif
 }
 
 #if defined __ORBIS__

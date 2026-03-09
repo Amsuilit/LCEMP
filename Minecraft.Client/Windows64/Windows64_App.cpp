@@ -14,6 +14,7 @@ CConsoleMinecraftApp app;
 
 CConsoleMinecraftApp::CConsoleMinecraftApp() : CMinecraftApp()
 {
+	memset(&m_ThumbnailBuffer, 0, sizeof(ImageFileBuffer));
 }
 
 void CConsoleMinecraftApp::SetRichPresenceContext(int iPad, int contextId)
@@ -35,12 +36,32 @@ void CConsoleMinecraftApp::FatalLoadError()
 
 void CConsoleMinecraftApp::CaptureSaveThumbnail()
 {
+	RenderManager.CaptureThumbnail(&m_ThumbnailBuffer);
 }
 void CConsoleMinecraftApp::GetSaveThumbnail(PBYTE *pbData,DWORD *pdwSize)
 {
+	if (m_ThumbnailBuffer.Allocated())
+	{
+		if (pbData)
+		{
+			*pbData = new BYTE[m_ThumbnailBuffer.GetBufferSize()];
+			*pdwSize = m_ThumbnailBuffer.GetBufferSize();
+			memcpy(*pbData, m_ThumbnailBuffer.GetBufferPointer(), *pdwSize);
+		}
+		m_ThumbnailBuffer.Release();
+	}
+	else
+	{
+		if (pbData) *pbData = NULL;
+		if (pdwSize) *pdwSize = 0;
+	}
 }
 void CConsoleMinecraftApp::ReleaseSaveThumbnail()
 {
+	if (m_ThumbnailBuffer.Allocated())
+	{
+		m_ThumbnailBuffer.Release();
+	}
 }
 
 void CConsoleMinecraftApp::GetScreenshot(int iPad,PBYTE *pbData,DWORD *pdwSize)

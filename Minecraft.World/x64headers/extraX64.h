@@ -13,14 +13,22 @@
 
 typedef unsigned char byte;
 
+#ifndef XUSER_INDEX_ANY
 const int XUSER_INDEX_ANY = 255;
+#endif
+#ifndef XUSER_INDEX_FOCUS
 const int XUSER_INDEX_FOCUS = 254;
+#endif
 
 #ifdef __PSVITA__
+#ifndef XUSER_MAX_COUNT
 const int XUSER_MAX_COUNT = 1;
+#endif
 const int MINECRAFT_NET_MAX_PLAYERS = 4;
 #else
+#ifndef XUSER_MAX_COUNT
 const int XUSER_MAX_COUNT = 4;
+#endif
 const int MINECRAFT_NET_MAX_PLAYERS = 8;
 #endif
 
@@ -225,6 +233,8 @@ private:
 };
 
 void Win64_SetupRemoteQNetPlayer(IQNetPlayer *player, BYTE smallId, bool isHost, bool isLocal);
+PlayerUID Win64_UsernameToXuid(const char* username);
+PlayerUID Win64_UsernameToXuid(const wchar_t* username);
 
 const int QNET_GETSENDQUEUESIZE_SECONDARY_TYPE = 0;
 const int QNET_GETSENDQUEUESIZE_MESSAGES = 0;

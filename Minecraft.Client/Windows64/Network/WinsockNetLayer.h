@@ -12,9 +12,10 @@
 #define WIN64_NET_DEFAULT_PORT 25565
 #define WIN64_NET_MAX_CLIENTS 7
 #define WIN64_NET_RECV_BUFFER_SIZE 65536
-#define WIN64_NET_MAX_PACKET_SIZE (4 * 1024 * 1024)
+#define WIN64_NET_MAX_PACKET_SIZE (3 * 1024 * 1024)
 #define WIN64_LAN_DISCOVERY_PORT 25566
 #define WIN64_LAN_BROADCAST_MAGIC 0x4D434C4E
+#define WIN64_LAN_BROADCAST_PLAYERS 8
 
 class Socket;
 
@@ -31,6 +32,8 @@ struct Win64LANBroadcast
 	DWORD texturePackParentId;
 	BYTE subTexturePackId;
 	BYTE isJoinable;
+	BYTE isDedicatedServer;
+	char playerNames[WIN64_LAN_BROADCAST_PLAYERS][XUSER_NAME_SIZE];
 };
 #pragma pack(pop)
 
@@ -46,7 +49,9 @@ struct Win64LANSession
 	unsigned int texturePackParentId;
 	unsigned char subTexturePackId;
 	bool isJoinable;
+	bool isDedicatedServer;
 	DWORD lastSeenTick;
+	char playerNames[WIN64_LAN_BROADCAST_PLAYERS][XUSER_NAME_SIZE];
 };
 
 struct Win64RemoteConnection
@@ -55,6 +60,7 @@ struct Win64RemoteConnection
 	BYTE smallId;
 	HANDLE recvThread;
 	volatile bool active;
+	CRITICAL_SECTION sendLock;
 };
 
 class WinsockNetLayer
@@ -79,15 +85,21 @@ public:
 	static SOCKET GetSocketForSmallId(BYTE smallId);
 
 	static void HandleDataReceived(BYTE fromSmallId, BYTE toSmallId, unsigned char *data, unsigned int dataSize);
+	static void FlushPendingData();
 
 	static bool PopDisconnectedSmallId(BYTE *outSmallId);
 	static void PushFreeSmallId(BYTE smallId);
 	static void CloseConnectionBySmallId(BYTE smallId);
 
+	static bool PopPendingJoinSmallId(BYTE *outSmallId);
+
+	static bool IsSmallIdConnected(BYTE smallId);
+
 	static bool StartAdvertising(int gamePort, const wchar_t *hostName, unsigned int gameSettings, unsigned int texPackId, unsigned char subTexId, unsigned short netVer);
 	static void StopAdvertising();
 	static void UpdateAdvertisePlayerCount(BYTE count);
 	static void UpdateAdvertiseJoinable(bool joinable);
+	static void UpdateAdvertisePlayerNames(BYTE count, const char playerNames[][XUSER_NAME_SIZE]);
 
 	static bool StartDiscovery();
 	static void StopDiscovery();
@@ -119,7 +131,7 @@ private:
 	static CRITICAL_SECTION s_sendLock;
 	static CRITICAL_SECTION s_connectionsLock;
 
-	static std::vector<Win64RemoteConnection> s_connections;
+	static Win64RemoteConnection s_connections[WIN64_NET_MAX_CLIENTS + 1];
 
 	static SOCKET s_advertiseSock;
 	static HANDLE s_advertiseThread;
@@ -137,8 +149,14 @@ private:
 	static CRITICAL_SECTION s_disconnectLock;
 	static std::vector<BYTE> s_disconnectedSmallIds;
 
+	static CRITICAL_SECTION s_pendingJoinLock;
+	static std::vector<BYTE> s_pendingJoinSmallIds;
+
 	static CRITICAL_SECTION s_freeSmallIdLock;
 	static std::vector<BYTE> s_freeSmallIds;
+
+	static CRITICAL_SECTION s_earlyDataLock;
+	static std::vector<BYTE> s_earlyDataBuffers[WIN64_NET_MAX_CLIENTS + 1];
 };
 
 extern bool g_Win64MultiplayerHost;

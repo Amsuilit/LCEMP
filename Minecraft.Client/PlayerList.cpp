@@ -106,6 +106,7 @@ void PlayerList::placeNewPlayer(Connection *connection, shared_ptr<ServerPlayer>
 			NetworkPlayerXbox *nxp = (NetworkPlayerXbox *)networkPlayer;
 			IQNetPlayer *qnp = nxp->GetQNetPlayer();
 			wcsncpy_s(qnp->m_gamertag, 32, player->name.c_str(), _TRUNCATE);
+			g_NetworkManager.UpdateAndSetGameSessionData();
 		}
 #endif
 
@@ -234,6 +235,10 @@ void PlayerList::placeNewPlayer(Connection *connection, shared_ptr<ServerPlayer>
         // 4J-PB - removed, since it needs to be localised in the language the client is in
 		//server->players->broadcastAll( shared_ptr<ChatPacket>( new ChatPacket(L"�e" + playerEntity->name + L" joined the game.") ) );
 		broadcastAll( shared_ptr<ChatPacket>( new ChatPacket(player->name, ChatPacket::e_ChatPlayerJoinedGame) ) );
+
+#ifdef WITH_SERVER_CODE
+		app.DebugPrintf("%ls joined the game", player->name.c_str());
+#endif
 
 		MemSect(14);
         add(player);
@@ -478,9 +483,12 @@ shared_ptr<ServerPlayer> PlayerList::getPlayerForLogin(PendingConnection *pendin
 		INetworkPlayer *np = pendingConnection->connection->getSocket()->getPlayer();
 		if (np != NULL)
 		{
-			PlayerUID realXuid = np->GetUID();
-			player->setXuid(realXuid);
-			player->setOnlineXuid(realXuid);
+
+			PlayerUID persistXuid = Win64_UsernameToXuid(userName.c_str());
+			player->setXuid(persistXuid);
+			// network player identification, not used for saves
+			PlayerUID networkXuid = np->GetUID();
+			player->setOnlineXuid(networkXuid);
 		}
 	}
 #endif

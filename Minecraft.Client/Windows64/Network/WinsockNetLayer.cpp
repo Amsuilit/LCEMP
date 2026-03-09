@@ -25,7 +25,7 @@ BYTE WinsockNetLayer::s_nextSmallId = 1;
 CRITICAL_SECTION WinsockNetLayer::s_sendLock;
 CRITICAL_SECTION WinsockNetLayer::s_connectionsLock;
 
-std::vector<Win64RemoteConnection> WinsockNetLayer::s_connections;
+Win64RemoteConnection WinsockNetLayer::s_connections[WIN64_NET_MAX_CLIENTS + 1];
 
 SOCKET WinsockNetLayer::s_advertiseSock = INVALID_SOCKET;
 HANDLE WinsockNetLayer::s_advertiseThread = NULL;
@@ -43,8 +43,14 @@ std::vector<Win64LANSession> WinsockNetLayer::s_discoveredSessions;
 CRITICAL_SECTION WinsockNetLayer::s_disconnectLock;
 std::vector<BYTE> WinsockNetLayer::s_disconnectedSmallIds;
 
+CRITICAL_SECTION WinsockNetLayer::s_pendingJoinLock;
+std::vector<BYTE> WinsockNetLayer::s_pendingJoinSmallIds;
+
 CRITICAL_SECTION WinsockNetLayer::s_freeSmallIdLock;
 std::vector<BYTE> WinsockNetLayer::s_freeSmallIds;
+
+CRITICAL_SECTION WinsockNetLayer::s_earlyDataLock;
+std::vector<BYTE> WinsockNetLayer::s_earlyDataBuffers[WIN64_NET_MAX_CLIENTS + 1];
 
 bool g_Win64MultiplayerHost = false;
 bool g_Win64MultiplayerJoin = false;
@@ -68,7 +74,18 @@ bool WinsockNetLayer::Initialize()
 	InitializeCriticalSection(&s_advertiseLock);
 	InitializeCriticalSection(&s_discoveryLock);
 	InitializeCriticalSection(&s_disconnectLock);
+	InitializeCriticalSection(&s_pendingJoinLock);
 	InitializeCriticalSection(&s_freeSmallIdLock);
+	InitializeCriticalSection(&s_earlyDataLock);
+
+	for (int i = 0; i < WIN64_NET_MAX_CLIENTS + 1; i++)
+	{
+		s_connections[i].tcpSocket = INVALID_SOCKET;
+		s_connections[i].smallId = 0;
+		s_connections[i].recvThread = NULL;
+		s_connections[i].active = false;
+		InitializeCriticalSection(&s_connections[i].sendLock);
+	}
 
 	s_initialized = true;
 
@@ -98,15 +115,22 @@ void WinsockNetLayer::Shutdown()
 	}
 
 	EnterCriticalSection(&s_connectionsLock);
-	for (size_t i = 0; i < s_connections.size(); i++)
+	for (int i = 0; i < WIN64_NET_MAX_CLIENTS + 1; i++)
 	{
 		s_connections[i].active = false;
 		if (s_connections[i].tcpSocket != INVALID_SOCKET)
 		{
 			closesocket(s_connections[i].tcpSocket);
+			s_connections[i].tcpSocket = INVALID_SOCKET;
 		}
+		if (s_connections[i].recvThread != NULL)
+		{
+			WaitForSingleObject(s_connections[i].recvThread, 2000);
+			CloseHandle(s_connections[i].recvThread);
+			s_connections[i].recvThread = NULL;
+		}
+		DeleteCriticalSection(&s_connections[i].sendLock);
 	}
-	s_connections.clear();
 	LeaveCriticalSection(&s_connectionsLock);
 
 	if (s_acceptThread != NULL)
@@ -131,6 +155,8 @@ void WinsockNetLayer::Shutdown()
 		DeleteCriticalSection(&s_discoveryLock);
 		DeleteCriticalSection(&s_disconnectLock);
 		s_disconnectedSmallIds.clear();
+		DeleteCriticalSection(&s_pendingJoinLock);
+		s_pendingJoinSmallIds.clear();
 		DeleteCriticalSection(&s_freeSmallIdLock);
 		s_freeSmallIds.clear();
 		WSACleanup();
@@ -243,7 +269,8 @@ bool WinsockNetLayer::JoinGame(const char *ip, int port)
 
 	bool connected = false;
 	BYTE assignedSmallId = 0;
-	const int maxAttempts = 12;
+	const int maxAttempts = 3;
+	const int connectTimeoutMs = 3000;
 
 	for (int attempt = 0; attempt < maxAttempts; ++attempt)
 	{
@@ -257,16 +284,59 @@ bool WinsockNetLayer::JoinGame(const char *ip, int port)
 		int noDelay = 1;
 		setsockopt(s_hostConnectionSocket, IPPROTO_TCP, TCP_NODELAY, (const char *)&noDelay, sizeof(noDelay));
 
+		u_long nonBlocking = 1;
+		ioctlsocket(s_hostConnectionSocket, FIONBIO, &nonBlocking);
+
 		iResult = connect(s_hostConnectionSocket, result->ai_addr, (int)result->ai_addrlen);
 		if (iResult == SOCKET_ERROR)
 		{
 			int err = WSAGetLastError();
-			app.DebugPrintf("connect() to %s:%d failed (attempt %d/%d): %d\n", ip, port, attempt + 1, maxAttempts, err);
-			closesocket(s_hostConnectionSocket);
-			s_hostConnectionSocket = INVALID_SOCKET;
-			Sleep(200);
-			continue;
+			if (err == WSAEWOULDBLOCK)
+			{
+				fd_set writeFds, exceptFds;
+				FD_ZERO(&writeFds);
+				FD_ZERO(&exceptFds);
+				FD_SET(s_hostConnectionSocket, &writeFds);
+				FD_SET(s_hostConnectionSocket, &exceptFds);
+
+				struct timeval tv;
+				tv.tv_sec = connectTimeoutMs / 1000;
+				tv.tv_usec = (connectTimeoutMs % 1000) * 1000;
+
+				int selectResult = select(0, NULL, &writeFds, &exceptFds, &tv);
+				if (selectResult <= 0 || FD_ISSET(s_hostConnectionSocket, &exceptFds))
+				{
+					app.DebugPrintf("connect() to %s:%d timed out or failed (attempt %d/%d)\n", ip, port, attempt + 1, maxAttempts);
+					closesocket(s_hostConnectionSocket);
+					s_hostConnectionSocket = INVALID_SOCKET;
+					continue;
+				}
+
+				int sockErr = 0;
+				int sockErrLen = sizeof(sockErr);
+				getsockopt(s_hostConnectionSocket, SOL_SOCKET, SO_ERROR, (char *)&sockErr, &sockErrLen);
+				if (sockErr != 0)
+				{
+					app.DebugPrintf("connect() to %s:%d failed with SO_ERROR %d (attempt %d/%d)\n", ip, port, sockErr, attempt + 1, maxAttempts);
+					closesocket(s_hostConnectionSocket);
+					s_hostConnectionSocket = INVALID_SOCKET;
+					continue;
+				}
+			}
+			else
+			{
+				app.DebugPrintf("connect() to %s:%d failed (attempt %d/%d): %d\n", ip, port, attempt + 1, maxAttempts, err);
+				closesocket(s_hostConnectionSocket);
+				s_hostConnectionSocket = INVALID_SOCKET;
+				continue;
+			}
 		}
+
+		u_long blocking = 0;
+		ioctlsocket(s_hostConnectionSocket, FIONBIO, &blocking);
+
+		DWORD recvTimeout = 3000;
+		setsockopt(s_hostConnectionSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&recvTimeout, sizeof(recvTimeout));
 
 		BYTE assignBuf[1];
 		int bytesRecv = recv(s_hostConnectionSocket, (char *)assignBuf, 1, 0);
@@ -275,7 +345,6 @@ bool WinsockNetLayer::JoinGame(const char *ip, int port)
 			app.DebugPrintf("Failed to receive small ID assignment from host (attempt %d/%d)\n", attempt + 1, maxAttempts);
 			closesocket(s_hostConnectionSocket);
 			s_hostConnectionSocket = INVALID_SOCKET;
-			Sleep(200);
 			continue;
 		}
 
@@ -291,6 +360,9 @@ bool WinsockNetLayer::JoinGame(const char *ip, int port)
 	}
 	s_localSmallId = assignedSmallId;
 
+	DWORD noTimeout = 0;
+	setsockopt(s_hostConnectionSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&noTimeout, sizeof(noTimeout));
+
 	app.DebugPrintf("Win64 LAN: Connected to %s:%d, assigned smallId=%d\n", ip, port, s_localSmallId);
 
 	s_active = true;
@@ -303,9 +375,7 @@ bool WinsockNetLayer::JoinGame(const char *ip, int port)
 
 bool WinsockNetLayer::SendOnSocket(SOCKET sock, const void *data, int dataSize)
 {
-	if (sock == INVALID_SOCKET || dataSize <= 0) return false;
-
-	EnterCriticalSection(&s_sendLock);
+	if (sock == INVALID_SOCKET || dataSize <= 0 || dataSize > WIN64_NET_MAX_PACKET_SIZE) return false;
 
 	BYTE header[4];
 	header[0] = (BYTE)((dataSize >> 24) & 0xFF);
@@ -319,10 +389,7 @@ bool WinsockNetLayer::SendOnSocket(SOCKET sock, const void *data, int dataSize)
 	{
 		int sent = send(sock, (const char *)header + totalSent, toSend - totalSent, 0);
 		if (sent == SOCKET_ERROR || sent == 0)
-		{
-			LeaveCriticalSection(&s_sendLock);
 			return false;
-		}
 		totalSent += sent;
 	}
 
@@ -331,14 +398,10 @@ bool WinsockNetLayer::SendOnSocket(SOCKET sock, const void *data, int dataSize)
 	{
 		int sent = send(sock, (const char *)data + totalSent, dataSize - totalSent, 0);
 		if (sent == SOCKET_ERROR || sent == 0)
-		{
-			LeaveCriticalSection(&s_sendLock);
 			return false;
-		}
 		totalSent += sent;
 	}
 
-	LeaveCriticalSection(&s_sendLock);
 	return true;
 }
 
@@ -348,27 +411,38 @@ bool WinsockNetLayer::SendToSmallId(BYTE targetSmallId, const void *data, int da
 
 	if (s_isHost)
 	{
-		SOCKET sock = GetSocketForSmallId(targetSmallId);
-		if (sock == INVALID_SOCKET) return false;
-		return SendOnSocket(sock, data, dataSize);
+		EnterCriticalSection(&s_connectionsLock);
+		if (targetSmallId >= WIN64_NET_MAX_CLIENTS + 1 || !s_connections[targetSmallId].active)
+		{
+			LeaveCriticalSection(&s_connectionsLock);
+			return false;
+		}
+		SOCKET sock = s_connections[targetSmallId].tcpSocket;
+		CRITICAL_SECTION *pLock = &s_connections[targetSmallId].sendLock;
+		LeaveCriticalSection(&s_connectionsLock);
+
+		EnterCriticalSection(pLock);
+		bool result = SendOnSocket(sock, data, dataSize);
+		LeaveCriticalSection(pLock);
+		return result;
 	}
 	else
 	{
-		return SendOnSocket(s_hostConnectionSocket, data, dataSize);
+		EnterCriticalSection(&s_sendLock);
+		bool result = SendOnSocket(s_hostConnectionSocket, data, dataSize);
+		LeaveCriticalSection(&s_sendLock);
+		return result;
 	}
 }
 
 SOCKET WinsockNetLayer::GetSocketForSmallId(BYTE smallId)
 {
 	EnterCriticalSection(&s_connectionsLock);
-	for (size_t i = 0; i < s_connections.size(); i++)
+	if (smallId < WIN64_NET_MAX_CLIENTS + 1 && s_connections[smallId].active)
 	{
-		if (s_connections[i].smallId == smallId && s_connections[i].active)
-		{
-			SOCKET sock = s_connections[i].tcpSocket;
-			LeaveCriticalSection(&s_connectionsLock);
-			return sock;
-		}
+		SOCKET sock = s_connections[smallId].tcpSocket;
+		LeaveCriticalSection(&s_connectionsLock);
+		return sock;
 	}
 	LeaveCriticalSection(&s_connectionsLock);
 	return INVALID_SOCKET;
@@ -391,13 +465,30 @@ void WinsockNetLayer::HandleDataReceived(BYTE fromSmallId, BYTE toSmallId, unsig
 	INetworkPlayer *pPlayerFrom = g_NetworkManager.GetPlayerBySmallId(fromSmallId);
 	INetworkPlayer *pPlayerTo = g_NetworkManager.GetPlayerBySmallId(toSmallId);
 
-	if (pPlayerFrom == NULL || pPlayerTo == NULL) return;
+	if (pPlayerFrom == NULL || pPlayerTo == NULL)
+	{
+		if (s_isHost && fromSmallId > 0 && fromSmallId < WIN64_NET_MAX_CLIENTS + 1)
+		{
+			EnterCriticalSection(&s_earlyDataLock);
+			s_earlyDataBuffers[fromSmallId].insert(
+				s_earlyDataBuffers[fromSmallId].end(), data, data + dataSize);
+			LeaveCriticalSection(&s_earlyDataLock);
+		}
+		return;
+	}
 
 	if (s_isHost)
 	{
 		::Socket *pSocket = pPlayerFrom->GetSocket();
 		if (pSocket != NULL)
 			pSocket->pushDataToQueue(data, dataSize, false);
+		else
+		{
+			EnterCriticalSection(&s_earlyDataLock);
+			s_earlyDataBuffers[fromSmallId].insert(
+				s_earlyDataBuffers[fromSmallId].end(), data, data + dataSize);
+			LeaveCriticalSection(&s_earlyDataLock);
+		}
 	}
 	else
 	{
@@ -405,6 +496,26 @@ void WinsockNetLayer::HandleDataReceived(BYTE fromSmallId, BYTE toSmallId, unsig
 		if (pSocket != NULL)
 			pSocket->pushDataToQueue(data, dataSize, true);
 	}
+}
+
+void WinsockNetLayer::FlushPendingData()
+{
+	EnterCriticalSection(&s_earlyDataLock);
+	for (int i = 1; i < WIN64_NET_MAX_CLIENTS + 1; i++)
+	{
+		if (s_earlyDataBuffers[i].empty()) continue;
+
+		INetworkPlayer *pPlayer = g_NetworkManager.GetPlayerBySmallId((BYTE)i);
+		if (pPlayer == NULL) continue;
+
+		::Socket *pSocket = pPlayer->GetSocket();
+		if (pSocket == NULL) continue;
+
+		pSocket->pushDataToQueue(s_earlyDataBuffers[i].data(),
+			(DWORD)s_earlyDataBuffers[i].size(), false);
+		s_earlyDataBuffers[i].clear();
+	}
+	LeaveCriticalSection(&s_earlyDataLock);
 }
 
 DWORD WINAPI WinsockNetLayer::AcceptThreadProc(LPVOID param)
@@ -459,15 +570,18 @@ DWORD WINAPI WinsockNetLayer::AcceptThreadProc(LPVOID param)
 			continue;
 		}
 
-		Win64RemoteConnection conn;
+		Win64RemoteConnection &conn = s_connections[assignedSmallId];
+
+		EnterCriticalSection(&s_connectionsLock);
+		if (conn.recvThread != NULL)
+		{
+			WaitForSingleObject(conn.recvThread, 2000);
+			CloseHandle(conn.recvThread);
+			conn.recvThread = NULL;
+		}
 		conn.tcpSocket = clientSocket;
 		conn.smallId = assignedSmallId;
 		conn.active = true;
-		conn.recvThread = NULL;
-
-		EnterCriticalSection(&s_connectionsLock);
-		s_connections.push_back(conn);
-		int connIdx = (int)s_connections.size() - 1;
 		LeaveCriticalSection(&s_connectionsLock);
 
 		app.DebugPrintf("Win64 LAN: Client connected, assigned smallId=%d\n", assignedSmallId);
@@ -477,16 +591,17 @@ DWORD WINAPI WinsockNetLayer::AcceptThreadProc(LPVOID param)
 		extern void Win64_SetupRemoteQNetPlayer(IQNetPlayer *player, BYTE smallId, bool isHost, bool isLocal);
 		Win64_SetupRemoteQNetPlayer(qnetPlayer, assignedSmallId, false, false);
 
-		extern CPlatformNetworkManagerStub *g_pPlatformNetworkManager;
-		g_pPlatformNetworkManager->NotifyPlayerJoined(qnetPlayer);
+
+		EnterCriticalSection(&s_pendingJoinLock);
+		s_pendingJoinSmallIds.push_back(assignedSmallId);
+		LeaveCriticalSection(&s_pendingJoinLock);
 
 		DWORD *threadParam = new DWORD;
-		*threadParam = connIdx;
+		*threadParam = assignedSmallId;
 		HANDLE hThread = CreateThread(NULL, 0, RecvThreadProc, threadParam, 0, NULL);
 
 		EnterCriticalSection(&s_connectionsLock);
-		if (connIdx < (int)s_connections.size())
-			s_connections[connIdx].recvThread = hThread;
+		s_connections[assignedSmallId].recvThread = hThread;
 		LeaveCriticalSection(&s_connectionsLock);
 	}
 	return 0;
@@ -494,17 +609,16 @@ DWORD WINAPI WinsockNetLayer::AcceptThreadProc(LPVOID param)
 
 DWORD WINAPI WinsockNetLayer::RecvThreadProc(LPVOID param)
 {
-	DWORD connIdx = *(DWORD *)param;
+	BYTE clientSmallId = (BYTE)*(DWORD *)param;
 	delete (DWORD *)param;
 
 	EnterCriticalSection(&s_connectionsLock);
-	if (connIdx >= (DWORD)s_connections.size())
+	if (clientSmallId >= WIN64_NET_MAX_CLIENTS + 1 || !s_connections[clientSmallId].active)
 	{
 		LeaveCriticalSection(&s_connectionsLock);
 		return 0;
 	}
-	SOCKET sock = s_connections[connIdx].tcpSocket;
-	BYTE clientSmallId = s_connections[connIdx].smallId;
+	SOCKET sock = s_connections[clientSmallId].tcpSocket;
 	LeaveCriticalSection(&s_connectionsLock);
 
 	std::vector<BYTE> recvBuf;
@@ -525,7 +639,7 @@ DWORD WINAPI WinsockNetLayer::RecvThreadProc(LPVOID param)
 			((uint32_t)header[2] << 8) |
 			((uint32_t)header[3]);
 
-		if (packetSize <= 0 || packetSize > WIN64_NET_MAX_PACKET_SIZE)
+		if (packetSize <= 0 || (unsigned int)packetSize > WIN64_NET_MAX_PACKET_SIZE)
 		{
 			app.DebugPrintf("Win64 LAN: Invalid packet size %d from client smallId=%d (max=%d)\n",
 				packetSize,
@@ -550,18 +664,11 @@ DWORD WINAPI WinsockNetLayer::RecvThreadProc(LPVOID param)
 	}
 
 	EnterCriticalSection(&s_connectionsLock);
-	for (size_t i = 0; i < s_connections.size(); i++)
+	s_connections[clientSmallId].active = false;
+	if (s_connections[clientSmallId].tcpSocket != INVALID_SOCKET)
 	{
-		if (s_connections[i].smallId == clientSmallId)
-		{
-			s_connections[i].active = false;
-			if (s_connections[i].tcpSocket != INVALID_SOCKET)
-			{
-				closesocket(s_connections[i].tcpSocket);
-				s_connections[i].tcpSocket = INVALID_SOCKET;
-			}
-			break;
-		}
+		closesocket(s_connections[clientSmallId].tcpSocket);
+		s_connections[clientSmallId].tcpSocket = INVALID_SOCKET;
 	}
 	LeaveCriticalSection(&s_connectionsLock);
 
@@ -593,20 +700,41 @@ void WinsockNetLayer::PushFreeSmallId(BYTE smallId)
 	LeaveCriticalSection(&s_freeSmallIdLock);
 }
 
+bool WinsockNetLayer::PopPendingJoinSmallId(BYTE *outSmallId)
+{
+	bool found = false;
+	EnterCriticalSection(&s_pendingJoinLock);
+	if (!s_pendingJoinSmallIds.empty())
+	{
+		*outSmallId = s_pendingJoinSmallIds.back();
+		s_pendingJoinSmallIds.pop_back();
+		found = true;
+	}
+	LeaveCriticalSection(&s_pendingJoinLock);
+	return found;
+}
+
+bool WinsockNetLayer::IsSmallIdConnected(BYTE smallId)
+{
+	if (smallId >= WIN64_NET_MAX_CLIENTS + 1) return false;
+	return s_connections[smallId].active;
+}
+
 void WinsockNetLayer::CloseConnectionBySmallId(BYTE smallId)
 {
 	EnterCriticalSection(&s_connectionsLock);
-	for (size_t i = 0; i < s_connections.size(); i++)
+	if (smallId < WIN64_NET_MAX_CLIENTS + 1 && s_connections[smallId].active && s_connections[smallId].tcpSocket != INVALID_SOCKET)
 	{
-		if (s_connections[i].smallId == smallId && s_connections[i].active && s_connections[i].tcpSocket != INVALID_SOCKET)
-		{
-			closesocket(s_connections[i].tcpSocket);
-			s_connections[i].tcpSocket = INVALID_SOCKET;
-			app.DebugPrintf("Win64 LAN: Force-closed TCP connection for smallId=%d\n", smallId);
-			break;
-		}
+		closesocket(s_connections[smallId].tcpSocket);
+		s_connections[smallId].tcpSocket = INVALID_SOCKET;
+		app.DebugPrintf("Win64 LAN: Force-closed TCP connection for smallId=%d\n", smallId);
 	}
 	LeaveCriticalSection(&s_connectionsLock);
+
+	EnterCriticalSection(&s_earlyDataLock);
+	if (smallId < WIN64_NET_MAX_CLIENTS + 1)
+		s_earlyDataBuffers[smallId].clear();
+	LeaveCriticalSection(&s_earlyDataLock);
 }
 
 DWORD WINAPI WinsockNetLayer::ClientRecvThreadProc(LPVOID param)
@@ -623,9 +751,9 @@ DWORD WINAPI WinsockNetLayer::ClientRecvThreadProc(LPVOID param)
 			break;
 		}
 
-		int packetSize = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
+		int packetSize = ((uint32_t)header[0] << 24) | ((uint32_t)header[1] << 16) | ((uint32_t)header[2] << 8) | (uint32_t)header[3];
 
-		if (packetSize <= 0 || packetSize > WIN64_NET_MAX_PACKET_SIZE)
+		if (packetSize <= 0 || (unsigned int)packetSize > WIN64_NET_MAX_PACKET_SIZE)
 		{
 			app.DebugPrintf("Win64 LAN: Invalid packet size %d from host (max=%d)\n",
 				packetSize,
@@ -636,7 +764,6 @@ DWORD WINAPI WinsockNetLayer::ClientRecvThreadProc(LPVOID param)
 		if ((int)recvBuf.size() < packetSize)
 		{
 			recvBuf.resize(packetSize);
-			app.DebugPrintf("Win64 LAN: Resized client recv buffer to %d bytes\n", packetSize);
 		}
 
 		if (!RecvExact(s_hostConnectionSocket, &recvBuf[0], packetSize))
@@ -669,6 +796,11 @@ bool WinsockNetLayer::StartAdvertising(int gamePort, const wchar_t *hostName, un
 	s_advertiseData.texturePackParentId = texPackId;
 	s_advertiseData.subTexturePackId = subTexId;
 	s_advertiseData.isJoinable = 0;
+#ifdef WITH_SERVER_CODE
+	s_advertiseData.isDedicatedServer = 1;
+#else
+	s_advertiseData.isDedicatedServer = 0;
+#endif
 	s_hostGamePort = gamePort;
 	LeaveCriticalSection(&s_advertiseLock);
 
@@ -711,6 +843,18 @@ void WinsockNetLayer::UpdateAdvertisePlayerCount(BYTE count)
 {
 	EnterCriticalSection(&s_advertiseLock);
 	s_advertiseData.playerCount = count;
+	LeaveCriticalSection(&s_advertiseLock);
+}
+
+void WinsockNetLayer::UpdateAdvertisePlayerNames(BYTE count, const char playerNames[][XUSER_NAME_SIZE])
+{
+	EnterCriticalSection(&s_advertiseLock);
+	memset(s_advertiseData.playerNames, 0, sizeof(s_advertiseData.playerNames));
+	s_advertiseData.playerCount = count;
+	for (int i = 0; i < count && i < WIN64_LAN_BROADCAST_PLAYERS; i++)
+	{
+		memcpy(s_advertiseData.playerNames[i], playerNames[i], XUSER_NAME_SIZE);
+	}
 	LeaveCriticalSection(&s_advertiseLock);
 }
 
@@ -821,7 +965,8 @@ std::vector<Win64LANSession> WinsockNetLayer::GetDiscoveredSessions()
 
 DWORD WINAPI WinsockNetLayer::DiscoveryThreadProc(LPVOID param)
 {
-	char recvBuf[512];
+	char recvBuf[1024];
+	const size_t MAX_DISCOVERED_SESSIONS = 64;
 
 	while (s_discovering)
 	{
@@ -842,6 +987,11 @@ DWORD WINAPI WinsockNetLayer::DiscoveryThreadProc(LPVOID param)
 		Win64LANBroadcast *broadcast = (Win64LANBroadcast *)recvBuf;
 		if (broadcast->magic != WIN64_LAN_BROADCAST_MAGIC)
 			continue;
+
+		broadcast->hostName[31] = L'\0';
+
+		for (int pn = 0; pn < WIN64_LAN_BROADCAST_PLAYERS; pn++)
+			broadcast->playerNames[pn][XUSER_NAME_SIZE - 1] = '\0';
 
 		char senderIP[64];
 		inet_ntop(AF_INET, &senderAddr.sin_addr, senderIP, sizeof(senderIP));
@@ -864,7 +1014,9 @@ DWORD WINAPI WinsockNetLayer::DiscoveryThreadProc(LPVOID param)
 				s_discoveredSessions[i].texturePackParentId = broadcast->texturePackParentId;
 				s_discoveredSessions[i].subTexturePackId = broadcast->subTexturePackId;
 				s_discoveredSessions[i].isJoinable = (broadcast->isJoinable != 0);
+				s_discoveredSessions[i].isDedicatedServer = (broadcast->isDedicatedServer != 0);
 				s_discoveredSessions[i].lastSeenTick = now;
+				memcpy(s_discoveredSessions[i].playerNames, broadcast->playerNames, sizeof(broadcast->playerNames));
 				found = true;
 				break;
 			}
@@ -872,6 +1024,12 @@ DWORD WINAPI WinsockNetLayer::DiscoveryThreadProc(LPVOID param)
 
 		if (!found)
 		{
+			if (s_discoveredSessions.size() >= MAX_DISCOVERED_SESSIONS)
+			{
+				LeaveCriticalSection(&s_discoveryLock);
+				continue;
+			}
+
 			Win64LANSession session;
 			memset(&session, 0, sizeof(session));
 			strncpy_s(session.hostIP, sizeof(session.hostIP), senderIP, _TRUNCATE);
@@ -884,7 +1042,9 @@ DWORD WINAPI WinsockNetLayer::DiscoveryThreadProc(LPVOID param)
 			session.texturePackParentId = broadcast->texturePackParentId;
 			session.subTexturePackId = broadcast->subTexturePackId;
 			session.isJoinable = (broadcast->isJoinable != 0);
+			session.isDedicatedServer = (broadcast->isDedicatedServer != 0);
 			session.lastSeenTick = now;
+			memcpy(session.playerNames, broadcast->playerNames, sizeof(broadcast->playerNames));
 			s_discoveredSessions.push_back(session);
 
 			app.DebugPrintf("Win64 LAN: Discovered game \"%ls\" at %s:%d\n",

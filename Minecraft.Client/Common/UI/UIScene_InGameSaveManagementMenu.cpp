@@ -60,7 +60,7 @@ UIScene_InGameSaveManagementMenu::UIScene_InGameSaveManagementMenu(int iPad, voi
 	m_saveDetails = NULL;
 	m_iSaveDetailsCount = 0;
 
-#if defined(__PS3__) || defined(__ORBIS__) || defined(__PSVITA__) || defined(_DURANGO)
+#if defined(__PS3__) || defined(__ORBIS__) || defined(__PSVITA__) || defined(_DURANGO) || defined(_WINDOWS64)
 	// Always clear the saves when we enter this menu
 	StorageManager.ClearSavesInfo();
 #endif

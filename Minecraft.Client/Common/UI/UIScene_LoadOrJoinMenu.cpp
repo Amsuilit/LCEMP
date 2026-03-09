@@ -158,7 +158,7 @@ UIScene_LoadOrJoinMenu::UIScene_LoadOrJoinMenu(int iPad, void *initData, UILayer
     }
 #endif
 
-#if defined(__PS3__) || defined(__ORBIS__) || defined(__PSVITA__) || defined(_DURANGO)
+#if defined(__PS3__) || defined(__ORBIS__) || defined(__PSVITA__) || defined(_DURANGO) || defined(_WINDOWS64)
     // Always clear the saves when we enter this menu
     StorageManager.ClearSavesInfo();
 #endif
@@ -1174,7 +1174,7 @@ int UIScene_LoadOrJoinMenu::KeyboardCompleteWorldNameCallback(LPVOID lpParam,boo
         // check the name is valid
         if(ui16Text[0]!=0)
         {
-#if (defined __PS3__ || defined __ORBIS__ || defined _DURANGO  || defined(__PSVITA__))
+#if (defined __PS3__ || defined __ORBIS__ || defined _DURANGO  || defined(__PSVITA__) || defined(_WINDOWS64))
             // open the save and overwrite the metadata
             StorageManager.RenameSaveData(pClass->m_iSaveListIndex - pClass->m_iDefaultButtonsC, ui16Text,&UIScene_LoadOrJoinMenu::RenameSaveDataReturned,pClass);
 #endif
@@ -1542,7 +1542,7 @@ void UIScene_LoadOrJoinMenu::LoadLevelGen(LevelGenerationOptions *levelGen)
     bool isClientSide = false;
     bool isPrivate = false;
     // TODO int maxPlayers = MINECRAFT_NET_MAX_PLAYERS;
-    int maxPlayers = 8;
+    int maxPlayers = MINECRAFT_NET_MAX_PLAYERS;
 
     if( app.GetTutorialMode() )
     {

@@ -70,12 +70,16 @@ typedef struct _GameSessionData
 
 	bool isReadyToJoin;
 	bool isJoinable;
+	bool isDedicatedServer;
 
 	char hostIP[64];
 	int hostPort;
 	wchar_t hostName[XUSER_NAME_SIZE];
 	unsigned char playerCount;
 	unsigned char maxPlayers;
+
+	GameSessionUID players[MINECRAFT_NET_MAX_PLAYERS];
+	char szPlayers[MINECRAFT_NET_MAX_PLAYERS][XUSER_NAME_SIZE];
 
 	_GameSessionData()
 	{
@@ -85,11 +89,14 @@ typedef struct _GameSessionData
 		subTexturePackId = 0;
 		isReadyToJoin = false;
 		isJoinable = true;
+		isDedicatedServer = false;
 		memset(hostIP, 0, sizeof(hostIP));
 		hostPort = 0;
 		memset(hostName, 0, sizeof(hostName));
 		playerCount = 0;
 		maxPlayers = MINECRAFT_NET_MAX_PLAYERS;
+		memset(players, 0, sizeof(players));
+		memset(szPlayers, 0, sizeof(szPlayers));
 	}
 } GameSessionData;
 #endif

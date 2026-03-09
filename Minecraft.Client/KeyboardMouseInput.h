@@ -23,6 +23,8 @@ public:
 	static const int KEY_DROP = 'Q';
 	static const int KEY_CRAFTING = VK_TAB;
 	static const int KEY_CRAFTING_ALT = 'R';
+	static const int KEY_CONFIRM = VK_RETURN;
+	static const int KEY_CANCEL = VK_BACK;
 	static const int KEY_PAUSE = VK_ESCAPE;
 	static const int KEY_THIRD_PERSON = VK_F5;
 	static const int KEY_DEBUG_INFO = VK_F3;
@@ -77,6 +79,10 @@ public:
 
 	float GetLookX(float sensitivity) const;
 	float GetLookY(float sensitivity) const;
+
+	int GetRawDeltaX() const { return m_mouseDeltaAccumX; }
+	int GetRawDeltaY() const { return m_mouseDeltaAccumY; }
+	void ConsumeMouseDelta() { m_mouseDeltaAccumX = 0; m_mouseDeltaAccumY = 0; }
 
 private:
 	bool m_keyDown[MAX_KEYS];

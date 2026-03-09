@@ -201,7 +201,91 @@ DWORD IQNetPlayer::GetCurrentRtt() { return 0; }
 bool IQNetPlayer::IsHost() { return m_isHostPlayer; }
 bool IQNetPlayer::IsGuest() { return false; }
 bool IQNetPlayer::IsLocal() { return !m_isRemote; }
-PlayerUID IQNetPlayer::GetXuid() { return (PlayerUID)(0xe000d45248242f2e + m_smallId); }
+static void Win64_BuildSplitName(int iPad, char *outName, int outSize);
+
+PlayerUID IQNetPlayer::GetXuid()
+{
+#ifdef _WINDOWS64
+	if (!m_isRemote)
+	{
+		int idx = (int)(this - &IQNet::m_player[0]);
+		if (idx == 0)
+		{
+			extern char g_Win64Username[17];
+			return Win64_UsernameToXuid(g_Win64Username);
+		}
+		if (idx > 0 && idx < XUSER_MAX_COUNT)
+		{
+			char splitName[32];
+			Win64_BuildSplitName(idx, splitName, sizeof(splitName));
+			return Win64_UsernameToXuid(splitName);
+		}
+	}
+#endif
+	return (PlayerUID)(0xe000d45248242f2e + m_smallId);
+}
+
+PlayerUID Win64_UsernameToXuid(const char* username)
+{
+	uint64_t hash = 14695981039346656037ULL;
+	for (const char* p = username; *p; ++p)
+	{
+		hash ^= (uint64_t)(unsigned char)(*p);
+		hash *= 1099511628211ULL;
+	}
+
+	const uint64_t WIN64_XUID_BASE = 0xe000d45248242f2e;
+	if (hash >= WIN64_XUID_BASE && hash <= WIN64_XUID_BASE + MINECRAFT_NET_MAX_PLAYERS)
+		hash = WIN64_XUID_BASE + MINECRAFT_NET_MAX_PLAYERS + 1;
+	if (hash == 0)
+		hash = 1;
+	return (PlayerUID)hash;
+}
+
+PlayerUID Win64_UsernameToXuid(const wchar_t* username)
+{
+	char narrow[64];
+	int i = 0;
+	for (; username[i] && i < 63; ++i)
+		narrow[i] = (char)(unsigned char)(username[i] & 0xFF);
+	narrow[i] = 0;
+	return Win64_UsernameToXuid(narrow);
+}
+
+static void Win64_BuildSplitName(int iPad, char *outName, int outSize)
+{
+	extern char g_Win64Username[17];
+	char candidate[32];
+	sprintf_s(candidate, sizeof(candidate), "%s_%d", g_Win64Username, iPad);
+	for (DWORD i = 0; i < MINECRAFT_NET_MAX_PLAYERS; i++)
+	{
+		if (!IQNet::m_player[i].m_isRemote) continue;
+		if (IQNet::m_player[i].m_gamertag[0] == 0) continue;
+		char remoteName[64];
+		int j = 0;
+		for (; IQNet::m_player[i].m_gamertag[j] && j < 63; ++j)
+			remoteName[j] = (char)(unsigned char)(IQNet::m_player[i].m_gamertag[j] & 0xFF);
+		remoteName[j] = 0;
+		if (_stricmp(candidate, remoteName) == 0)
+		{
+			sprintf_s(candidate, sizeof(candidate), "%s_%d_L", g_Win64Username, iPad);
+			break;
+		}
+	}
+	strncpy_s(outName, outSize, candidate, _TRUNCATE);
+}
+
+static void Win64_BuildSplitNameW(int iPad, wchar_t *outName, int outSize)
+{
+	char narrow[32];
+	Win64_BuildSplitName(iPad, narrow, sizeof(narrow));
+	for (int i = 0; i < outSize - 1 && narrow[i]; ++i)
+	{
+		outName[i] = (wchar_t)(unsigned char)narrow[i];
+		outName[i + 1] = 0;
+	}
+}
+
 LPCWSTR IQNetPlayer::GetGamertag() { return m_gamertag; }
 int IQNetPlayer::GetSessionIndex() { return m_smallId; }
 bool IQNetPlayer::IsTalking() { return false; }
@@ -222,6 +306,8 @@ bool IQNet::s_isHosting = true;
 
 QNET_STATE _iQNetStubState = QNET_STATE_IDLE;
 
+bool g_connectedToDedicatedServer = false;
+
 void Win64_SetupRemoteQNetPlayer(IQNetPlayer *player, BYTE smallId, bool isHost, bool isLocal)
 {
 	player->m_smallId = smallId;
@@ -234,15 +320,28 @@ void Win64_SetupRemoteQNetPlayer(IQNetPlayer *player, BYTE smallId, bool isHost,
 
 static bool Win64_IsActivePlayer(IQNetPlayer *p, DWORD index);
 
-HRESULT IQNet::AddLocalPlayerByUserIndex(DWORD dwUserIndex){ return S_OK; }
+HRESULT IQNet::AddLocalPlayerByUserIndex(DWORD dwUserIndex)
+{
+	if (dwUserIndex >= MINECRAFT_NET_MAX_PLAYERS) return E_FAIL;
+	m_player[dwUserIndex].m_isRemote = false;
+	m_player[dwUserIndex].m_smallId = (BYTE)dwUserIndex;
+	if (dwUserIndex > 0)
+	{
+		wchar_t splitNameW[32];
+		Win64_BuildSplitNameW((int)dwUserIndex, splitNameW, 32);
+		wcscpy_s(m_player[dwUserIndex].m_gamertag, 32, splitNameW);
+	}
+	if (dwUserIndex >= (DWORD)s_playerCount)
+		s_playerCount = dwUserIndex + 1;
+	return S_OK;
+}
 IQNetPlayer *IQNet::GetHostPlayer() { return &m_player[0]; }
 IQNetPlayer *IQNet::GetLocalPlayerByUserIndex(DWORD dwUserIndex)
 {
 	if (s_isHosting)
 	{
 		if (dwUserIndex < MINECRAFT_NET_MAX_PLAYERS &&
-			!m_player[dwUserIndex].m_isRemote &&
-			Win64_IsActivePlayer(&m_player[dwUserIndex], dwUserIndex))
+			!m_player[dwUserIndex].m_isRemote)
 			return &m_player[dwUserIndex];
 		return NULL;
 	}
@@ -257,8 +356,15 @@ IQNetPlayer *IQNet::GetLocalPlayerByUserIndex(DWORD dwUserIndex)
 }
 static bool Win64_IsActivePlayer(IQNetPlayer *p, DWORD index)
 {
-	if (index == 0) return true;
-	return (p->GetCustomDataValue() != 0);
+	if (index == 0)
+	{
+		extern bool g_connectedToDedicatedServer;
+		if (g_connectedToDedicatedServer && !IQNet::s_isHosting)
+			return false;
+		return true;
+	}
+	if (p->GetCustomDataValue() != 0) return true;
+	return (p->m_isRemote && p->m_gamertag[0] != 0);
 }
 
 IQNetPlayer *IQNet::GetPlayerByIndex(DWORD dwPlayerIndex)
@@ -488,7 +594,46 @@ DWORD XEnableGuestSignin(BOOL fEnable) { return 0; }
 /////////////////////////////////////////////// Profile library
 #ifdef _WINDOWS64
 static void *profileData[4];
-static bool s_bProfileIsFullVersion;
+static int profileDataSizePerPlayer = 0;
+static bool s_bProfileIsFullVersion = true;
+static bool s_profileLoadedFromDisk[4] = {false, false, false, false};
+
+bool Win64_HasSavedProfile(int iPad)
+{
+	if (iPad >= 0 && iPad < 4) return s_profileLoadedFromDisk[iPad];
+	return false;
+}
+
+static void GetProfileFilePath(int iQuadrant, char *outPath, int maxLen)
+{
+	char curDir[256];
+	GetCurrentDirectoryA(sizeof(curDir), curDir);
+	sprintf_s(outPath, maxLen, "%s\\Windows64\\GameHDD\\profile_%d.dat", curDir, iQuadrant);
+}
+
+static bool LoadProfileFromDisk(int iQuadrant, void *pData, int dataSize)
+{
+	char path[256];
+	GetProfileFilePath(iQuadrant, path, sizeof(path));
+	FILE *f = NULL;
+	fopen_s(&f, path, "rb");
+	if (!f) return false;
+	size_t bytesRead = fread(pData, 1, dataSize, f);
+	fclose(f);
+	return (bytesRead == (size_t)dataSize);
+}
+
+static void SaveProfileToDisk(int iQuadrant, void *pData, int dataSize)
+{
+	char path[256];
+	GetProfileFilePath(iQuadrant, path, sizeof(path));
+	FILE *f = NULL;
+	fopen_s(&f, path, "wb");
+	if (!f) return;
+	fwrite(pData, 1, dataSize, f);
+	fclose(f);
+}
+
 void				C_4JProfile::Initialise( DWORD dwTitleID,
 								DWORD dwOfferID,
 								unsigned short usProfileVersion,
@@ -498,15 +643,17 @@ void				C_4JProfile::Initialise( DWORD dwTitleID,
 								int iGameDefinedDataSizeX4,
 								unsigned int *puiGameDefinedDataChangedBitmask)
 {
+	profileDataSizePerPlayer = iGameDefinedDataSizeX4/4;
 	for( int i = 0; i < 4; i++ )
 	{
-		profileData[i] = new byte[iGameDefinedDataSizeX4/4];
-		ZeroMemory(profileData[i],sizeof(byte)*iGameDefinedDataSizeX4/4);
+		profileData[i] = new byte[profileDataSizePerPlayer];
+		ZeroMemory(profileData[i],sizeof(byte)*profileDataSizePerPlayer);
 
 		// Set some sane initial values!
 		GAME_SETTINGS *pGameSettings = (GAME_SETTINGS *)profileData[i];
 		pGameSettings->ucMenuSensitivity=100; //eGameSetting_Sensitivity_InMenu
 		pGameSettings->ucInterfaceOpacity=80; //eGameSetting_Sensitivity_InMenu
+		pGameSettings->ucGamma=100; //eGameSetting_Gamma
 		pGameSettings->usBitmaskValues|=0x0200; //eGameSetting_DisplaySplitscreenGamertags - on
 		pGameSettings->usBitmaskValues|=0x0400; //eGameSetting_Hints - on
 		pGameSettings->usBitmaskValues|=0x1000; //eGameSetting_Autosave - 2
@@ -552,13 +699,18 @@ void				C_4JProfile::Initialise( DWORD dwTitleID,
 
 		// Has gone halfway through the tutorial
 		pGameSettings->ucTutorialCompletion[28] |= 1<<0;
+
+
+		s_profileLoadedFromDisk[i] = LoadProfileFromDisk(i, profileData[i], profileDataSizePerPlayer);
+
+		pGameSettings->bSettingsChanged = false;
 	}
 }
 void				C_4JProfile::SetTrialTextStringTable(CXuiStringTable *pStringTable,int iAccept,int iReject) {}
 void				C_4JProfile::SetTrialAwardText(eAwardType AwardType,int iTitle,int iText) {}
 int					C_4JProfile::GetLockedProfile() { return 0; }
 void				C_4JProfile::SetLockedProfile(int iProf) {}
-bool				C_4JProfile::IsSignedIn(int iQuadrant) { return ( iQuadrant == 0); }
+bool				C_4JProfile::IsSignedIn(int iQuadrant) { return (iQuadrant >= 0 && iQuadrant < XUSER_MAX_COUNT); }
 bool				C_4JProfile::IsSignedInLive(int iProf) { return true; }
 bool				C_4JProfile::IsGuest(int iQuadrant) { return false; }
 UINT				C_4JProfile::RequestSignInUI(bool bFromInvite,bool bLocalGame,bool bNoGuestsAllowed,bool bMultiplayerSignIn,bool bAddUser, int( *Func)(LPVOID,const bool, const int iPad),LPVOID lpParam,int iQuadrant) { return 0; }
@@ -569,15 +721,21 @@ bool				C_4JProfile::QuerySigninStatus(void) { return true; }
 void				C_4JProfile::GetXUID(int iPad, PlayerUID *pXuid,bool bOnlineXuid)
 {
 #ifdef _WINDOWS64
-	if (iPad != 0)
+	if (iPad == 0)
+	{
+		extern char g_Win64Username[17];
+		*pXuid = Win64_UsernameToXuid(g_Win64Username);
+	}
+	else if (iPad > 0 && iPad < XUSER_MAX_COUNT)
+	{
+		char splitName[32];
+		Win64_BuildSplitName(iPad, splitName, sizeof(splitName));
+		*pXuid = Win64_UsernameToXuid(splitName);
+	}
+	else
 	{
 		*pXuid = INVALID_XUID;
-		return;
 	}
-	if (IQNet::s_isHosting)
-		*pXuid = 0xe000d45248242f2e;
-	else
-		*pXuid = 0xe000d45248242f2e + WinsockNetLayer::GetLocalSmallId();
 #else
 	*pXuid = 0xe000d45248242f2e + iPad;
 #endif
@@ -608,8 +766,30 @@ char fakeGamerTag[32] = "PlayerName";
 void				SetFakeGamertag(char *name){ strcpy_s(fakeGamerTag, name); }
 char*				C_4JProfile::GetGamertag(int iPad){ return fakeGamerTag; }
 #else
-char*				C_4JProfile::GetGamertag(int iPad){ extern char g_Win64Username[17]; return g_Win64Username; }
-wstring				C_4JProfile::GetDisplayName(int iPad){ extern wchar_t g_Win64UsernameW[17]; return g_Win64UsernameW; }
+static char s_win64SplitNames[4][32];
+char*				C_4JProfile::GetGamertag(int iPad)
+{
+	extern char g_Win64Username[17];
+	if (iPad == 0) return g_Win64Username;
+	if (iPad > 0 && iPad < XUSER_MAX_COUNT)
+	{
+		Win64_BuildSplitName(iPad, s_win64SplitNames[iPad], sizeof(s_win64SplitNames[iPad]));
+		return s_win64SplitNames[iPad];
+	}
+	return g_Win64Username;
+}
+wstring				C_4JProfile::GetDisplayName(int iPad)
+{
+	extern wchar_t g_Win64UsernameW[17];
+	if (iPad == 0) return g_Win64UsernameW;
+	if (iPad > 0 && iPad < XUSER_MAX_COUNT)
+	{
+		wchar_t buf[32];
+		Win64_BuildSplitNameW(iPad, buf, 32);
+		return buf;
+	}
+	return g_Win64UsernameW;
+}
 #endif
 bool				C_4JProfile::IsFullVersion() { return s_bProfileIsFullVersion; }
 void				C_4JProfile::SetSignInChangeCallback(void ( *Func)(LPVOID, bool, unsigned int),LPVOID lpParam) {}
@@ -633,8 +813,28 @@ int					C_4JProfile::SetOldProfileVersionCallback(int( *Func)(LPVOID,unsigned ch
 C_4JProfile::PROFILESETTINGS ProfileSettingsA[XUSER_MAX_COUNT];
 
 C_4JProfile::PROFILESETTINGS *	C_4JProfile::GetDashboardProfileSettings(int iPad) { return &ProfileSettingsA[iPad]; }
-void				C_4JProfile::WriteToProfile(int iQuadrant, bool bGameDefinedDataChanged, bool bOverride5MinuteLimitOnProfileWrites) {}
-void				C_4JProfile::ForceQueuedProfileWrites(int iPad) {}
+void				C_4JProfile::WriteToProfile(int iQuadrant, bool bGameDefinedDataChanged, bool bOverride5MinuteLimitOnProfileWrites)
+{
+	if (iQuadrant >= 0 && iQuadrant < 4 && profileData[iQuadrant] && profileDataSizePerPlayer > 0)
+	{
+		SaveProfileToDisk(iQuadrant, profileData[iQuadrant], profileDataSizePerPlayer);
+	}
+}
+void				C_4JProfile::ForceQueuedProfileWrites(int iPad)
+{
+	if (iPad == XUSER_INDEX_ANY)
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			if (profileData[i] && profileDataSizePerPlayer > 0)
+				SaveProfileToDisk(i, profileData[i], profileDataSizePerPlayer);
+		}
+	}
+	else if (iPad >= 0 && iPad < 4 && profileData[iPad] && profileDataSizePerPlayer > 0)
+	{
+		SaveProfileToDisk(iPad, profileData[iPad], profileDataSizePerPlayer);
+	}
+}
 void				*C_4JProfile::GetGameDefinedProfileData(int iQuadrant)
 {
 	// 4J Stu - Don't reset the options when we call this!!

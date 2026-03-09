@@ -586,7 +586,7 @@ ConsoleSaveFileSplit::~ConsoleSaveFileSplit()
 	VirtualFree( pvHeap, MAX_PAGE_COUNT * CSF_PAGE_SIZE, MEM_DECOMMIT );
 	pagesCommitted = 0;
 	// Make sure we don't have any thumbnail data still waiting round - we can't need it now we've destroyed the save file anyway
-#if defined _XBOX 
+#if defined _XBOX || defined _WINDOWS64
 	app.GetSaveThumbnail(NULL,NULL);
 #elif defined __PS3__
 	app.GetSaveThumbnail(NULL,NULL, NULL,NULL);
@@ -1412,7 +1412,7 @@ void ConsoleSaveFileSplit::Flush(bool autosave, bool updateThumbnail)
 			PBYTE pbDataSaveImage=NULL;
 			DWORD dwDataSizeSaveImage=0;
 
-#if ( defined _XBOX || defined _DURANGO )
+#if ( defined _XBOX || defined _DURANGO || defined _WINDOWS64 )
 			app.GetSaveThumbnail(&pbThumbnailData,&dwThumbnailDataSize);
 #elif ( defined __PS3__ || defined __ORBIS__ )
 			app.GetSaveThumbnail(&pbThumbnailData,&dwThumbnailDataSize,&pbDataSaveImage,&dwDataSizeSaveImage);

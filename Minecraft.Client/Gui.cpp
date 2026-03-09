@@ -1021,7 +1021,10 @@ void Gui::render(float a, bool mouseFree, int xMouse, int yMouse)
 	{
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-		font->drawShadow(L"LCEMP by notpies", 2, screenHeight - 10, 0x55ffffff);
+		glPushMatrix();
+		glScalef(0.5f, 0.5f, 1.0f);
+		font->drawShadow(L"LCEMP", 4, (screenHeight - 5) * 2, 0x55ffffff);
+		glPopMatrix();
 	}
 
 	glColor4f(1, 1, 1, 1);
